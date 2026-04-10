@@ -1,0 +1,17 @@
+{
+  "tts": {
+    "voice": "af_heart",
+    "speed": 1.1,
+    "enabled": true
+  },
+  "stt": {
+    "model": "base.en",
+    "hotkey": "<ctrl>+<shift>+v",
+    "enabled": true
+  },
+  "animation": {
+    "radius": 8,
+    "fps": 15,
+    "color": "cyan"
+  }
+}
