@@ -28,6 +28,7 @@ class OrbAnimator:
         radius: int = 8,
         fps: int = 15,
         color: str = "cyan",
+        output=None,
     ):
         self.base_radius = radius
         self.fps = fps
@@ -35,6 +36,7 @@ class OrbAnimator:
         self._thread = None
         self._amplitude = 0.0
         self._lock = threading.Lock()
+        self._out = output or sys.stdout
 
         self._colors = {
             "cyan":    ("\033[96m", "\033[36m", "\033[34m"),
@@ -55,8 +57,8 @@ class OrbAnimator:
 
     def start(self):
         self.running = True
-        sys.stderr.write("\033[?25l")
-        sys.stderr.flush()
+        self._out.write("\033[?25l")
+        self._out.flush()
         self._thread = threading.Thread(target=self._animate, daemon=True)
         self._thread.start()
 
@@ -65,12 +67,12 @@ class OrbAnimator:
         if self._thread:
             self._thread.join(timeout=1.0)
         rows = self._canvas_h // 4 + 2
-        sys.stderr.write(f"\033[{rows}A")
+        self._out.write(f"\033[{rows}A")
         for _ in range(rows):
-            sys.stderr.write("\033[2K\n")
-        sys.stderr.write(f"\033[{rows}A")
-        sys.stderr.write("\033[?25h")
-        sys.stderr.flush()
+            self._out.write("\033[2K\n")
+        self._out.write(f"\033[{rows}A")
+        self._out.write("\033[?25h")
+        self._out.flush()
 
     def _render_orb(self, t: float, amplitude: float) -> list[str]:
         """Render the orb as lines of braille characters."""
@@ -147,12 +149,12 @@ class OrbAnimator:
             lines = self._render_orb(t, amp)
 
             if not first_frame:
-                sys.stderr.write(f"\033[{len(lines)}A")
+                self._out.write(f"\033[{len(lines)}A")
             first_frame = False
 
             for line in lines:
-                sys.stderr.write(f"\033[2K  {line}\n")
-            sys.stderr.flush()
+                self._out.write(f"\033[2K  {line}\n")
+            self._out.flush()
 
             t += 0.12
             time.sleep(1.0 / self.fps)
