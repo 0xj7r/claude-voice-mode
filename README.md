@@ -1,26 +1,27 @@
 # Claude Code Voice Mode
 
-Local TTS/STT voice interface for Claude Code. Speaks Claude's responses aloud with a pulsing terminal orb animation, and lets you talk back via hotkey.
-
-All processing runs locally on your machine. No API calls, no cloud services, no cost.
-
-## Demo
-
-When Claude responds, you'll see a pulsing braille-character orb in your terminal and hear the response spoken aloud via Kokoro TTS:
-
 ```
-       ⣀⣤⣴⣶⣶⣶⣷⣶⣶⣶⣤⣄⡀
-     ⢠⣾⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣦
-     ⠹⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⡿⠁
-      ⠈⠛⠿⢿⣿⣿⣿⣿⣿⣿⣿⠿⠟⠋
+                        ⣠⣴⣶⣿⣿⣿⣷⣶⣦⣄
+                      ⣰⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣷⡀
+                     ⣼⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⡄
+                     ⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿
+                     ⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿
+                     ⠹⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⠏
+                      ⠘⢿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⡿⠋
+                        ⠙⠻⣿⣿⣿⣿⣿⣿⠿⠛⠁
 ```
 
-## Requirements
+Talk to Claude. Claude talks back.
 
-- macOS with Apple Silicon (M1/M2/M3/M4)
-- Python 3.12+
-- Homebrew (for whisper-cpp STT)
-- Claude Code CLI
+Local TTS and STT for Claude Code. No APIs, no cloud, no cost. Just your voice and a pulsing orb.
+
+## What It Does
+
+**You speak** → hotkey records → faster-whisper transcribes (<1s) → auto-submits to Claude
+
+**Claude responds** → Stop hook fires → Kokoro TTS speaks → orb pulses with audio
+
+All local. All free. Apple Silicon optimized.
 
 ## Install
 
@@ -30,41 +31,56 @@ cd ~/.claude/voice-mode
 bash install.sh
 ```
 
-The installer handles everything:
-1. Creates a Python venv and installs dependencies
-2. Downloads Kokoro TTS model (~310 MB), voices (~27 MB), and Whisper STT model (~141 MB)
-3. Installs whisper-cpp via Homebrew
-4. Configures the Claude Code Stop hook in `~/.claude/settings.json`
-
-## How It Works
-
-### TTS (Claude speaks to you)
-
-A Claude Code [Stop hook](https://docs.anthropic.com/en/docs/claude-code/hooks) fires after every response. It reads the transcript, extracts Claude's last message, strips markdown, and streams it through [Kokoro TTS](https://github.com/thewh1teagle/kokoro-onnx) (82M parameter model, near-commercial quality). A pulsing orb animates in your terminal during playback, driven by real-time audio amplitude.
-
-### STT (you speak to Claude)
-
-Run the voice daemon in a separate terminal. Press `Ctrl+Shift+V` to start recording, press again to stop. Your speech is transcribed locally via [whisper.cpp](https://github.com/ggerganov/whisper.cpp) and typed into the Claude Code prompt.
-
-### Interrupt
-
-Press the hotkey while TTS is playing to stop it immediately and start recording. The interrupt is instant (mid-sentence).
-
-You can also stop TTS from any terminal:
-
-```bash
-~/.claude/voice-mode/stop_tts.sh
-```
+Downloads ~480 MB of models on first run. Takes a few minutes.
 
 ## Usage
 
-TTS activates automatically after install (via the Stop hook).
-
-For voice input, run the daemon in a separate terminal:
-
+**Terminal 1** (voice terminal):
 ```bash
-~/.claude/voice-mode/venv/bin/python3 ~/.claude/voice-mode/voice_daemon.py
+~/.claude/voice-mode/daemon.sh
 ```
+
+**Terminal 2** (Claude Code):
+```bash
+claude
+```
+
+Press `Ctrl+Shift+V` to speak. Claude's responses are spoken aloud with a pulsing orb in Terminal 1.
+
+Toggle TTS from Claude Code:
+```
+! tts
+```
+
+## Requirements
+
+- macOS with Apple Silicon
+- Python 3.12+
+- Claude Code CLI
+- Accessibility permission for your terminal app (System Settings > Privacy & Security > Accessibility)
+
+## How It Works
+
+```
+┌─────────────────────────────────┐     ┌──────────────────────────┐
+│  Daemon Terminal                │     │  Claude Code Terminal     │
+│                                 │     │                          │
+│  Ctrl+Shift+V → record mic     │     │                          │
+│  faster-whisper → transcribe    │────>│  Text typed + submitted  │
+│                                 │     │                          │
+│         ⣠⣴⣶⣿⣿⣿⣷⣶⣦⣄              │     │  Claude responds         │
+│       ⣰⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣷⡀           │<────│  Stop hook fires         │
+│       ⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿           │     │                          │
+│       ⠘⢿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⡿⠋           │     │                          │
+│  Kokoro TTS → audio playback   │     │                          │
+│  Orb pulses with amplitude     │     │                          │
+└─────────────────────────────────┘     └──────────────────────────┘
+```
+
+The daemon runs as a single process:
+- **Socket listener** (background thread): receives text from Claude Code's Stop hook via Unix socket
+- **Hotkey listener** (main thread): records mic, transcribes with faster-whisper, types into Claude Code
+- **Orb renderer**: braille-character circle, amplitude-reactive, centered in terminal
 
 ## Configuration
 
@@ -85,50 +101,48 @@ Edit `~/.claude/voice-mode/config.json`:
   "animation": {
     "radius": 8,
     "fps": 15,
-    "color": "cyan"
+    "color": "white"
   }
 }
 ```
 
-### TTS voices
+### Voices
 
-Kokoro includes ~50 voices. Some good ones:
-- `af_heart` (default, warm female)
-- `af_sky` (clear female)
-- `am_adam` (male)
-- `bf_emma` (British female)
-- `bm_george` (British male)
+Kokoro ships with ~50 voices:
 
-### Animation colors
+| Voice | Description |
+|-------|-------------|
+| `af_heart` | Warm female (default) |
+| `af_sky` | Clear female |
+| `am_adam` | Male |
+| `bf_emma` | British female |
+| `bm_george` | British male |
 
-`cyan`, `green`, `magenta`, `blue`, `white`
+### Controls
 
-## Architecture
-
-```
-hook_tts.sh          Stop hook entry point (called by Claude Code)
-  └─ tts_player.py   Reads transcript, cleans text, streams TTS
-       └─ orb_animator.py   Braille-character pulsing orb
-
-voice_daemon.py      Hotkey listener + mic recording + whisper.cpp STT
-stop_tts.sh          Kill active TTS via SIGUSR1
-install.sh           One-command installer
-```
+| Action | How |
+|--------|-----|
+| Toggle TTS | `! tts` in Claude Code |
+| Record voice | `Ctrl+Shift+V` (press again to stop) |
+| Stop TTS mid-speech | Press hotkey while speaking |
+| Stop TTS from shell | `~/.claude/voice-mode/stop_tts.sh` |
 
 ## Stack
 
-| Component | Library | Size |
-|-----------|---------|------|
-| TTS | [Kokoro ONNX](https://github.com/thewh1teagle/kokoro-onnx) | 310 MB model |
-| STT | [whisper.cpp](https://github.com/ggerganov/whisper.cpp) | 141 MB model |
-| Audio | [sounddevice](https://python-sounddevice.readthedocs.io/) | via PortAudio |
-| Animation | Custom braille renderer | ~5 KB |
+| Component | Library | Notes |
+|-----------|---------|-------|
+| TTS | [Kokoro ONNX](https://github.com/thewh1teagle/kokoro-onnx) | 82M params, ~310 MB |
+| STT | [faster-whisper](https://github.com/SYSTRAN/faster-whisper) | tiny.en, <1s transcription |
+| Audio | [sounddevice](https://python-sounddevice.readthedocs.io/) | PortAudio bindings |
+| Animation | Custom braille renderer | Sub-character resolution circle |
 
 ## Uninstall
 
-Remove the hook from `~/.claude/settings.json` (delete the `hooks.Stop` entry), then:
-
 ```bash
+# Remove hook from settings
+# (delete the hooks.Stop entry in ~/.claude/settings.json)
+
+# Remove files
 rm -rf ~/.claude/voice-mode
 ```
 

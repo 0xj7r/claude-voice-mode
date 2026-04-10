@@ -4,3 +4,4 @@ __pycache__/
 *.pyc
 .tts.pid
 .DS_Store
+.hook.log
