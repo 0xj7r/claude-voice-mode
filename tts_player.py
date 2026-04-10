@@ -204,16 +204,86 @@ def send_to_daemon(text: str) -> bool:
         return False
 
 
+def _find_whisper_cpp() -> str | None:
+    """Find whisper-cpp binary."""
+    import subprocess as sp
+    for name in ["whisper-cli", "whisper-cpp", "whisper"]:
+        result = sp.run(["which", name], capture_output=True, text=True)
+        if result.returncode == 0:
+            return result.stdout.strip()
+    for name in ["whisper-cli", "whisper-cpp"]:
+        brew_path = f"/opt/homebrew/bin/{name}"
+        if os.path.exists(brew_path):
+            return brew_path
+    return None
+
+
+def _find_whisper_model(model_name: str = "base.en") -> str | None:
+    """Find the whisper model file."""
+    model_dir = os.path.join(VOICE_MODE_DIR, "models")
+    local = os.path.join(model_dir, f"ggml-{model_name}.bin")
+    if os.path.exists(local):
+        return local
+    brew = f"/opt/homebrew/share/whisper-cpp/models/ggml-{model_name}.bin"
+    if os.path.exists(brew):
+        return brew
+    return None
+
+
+def _transcribe(audio: np.ndarray, whisper_bin: str, model_path: str) -> str:
+    """Record numpy audio to wav, transcribe with whisper.cpp."""
+    import subprocess as sp
+    import tempfile
+    import wave
+
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+        wav_path = f.name
+
+    try:
+        audio_int16 = (audio * 32767).astype(np.int16)
+        with wave.open(wav_path, "w") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(16000)
+            wf.writeframes(audio_int16.tobytes())
+
+        result = sp.run(
+            [whisper_bin, "-m", model_path, "-f", wav_path, "--no-timestamps", "-nt"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+        return ""
+    finally:
+        os.unlink(wav_path)
+
+
+def _type_text(text: str):
+    """Type text into the focused application using osascript."""
+    import subprocess as sp
+    escaped = text.replace("\\", "\\\\").replace('"', '\\"')
+    sp.run(["osascript", "-e", f'tell application "System Events" to keystroke "{escaped}"'],
+           capture_output=True)
+
+
 def run_daemon():
-    """Run as a foreground daemon: listens on a socket, shows orb in terminal."""
+    """Unified daemon: TTS (socket listener + orb) and STT (hotkey + whisper)."""
+    import sounddevice as sd
+
     signal.signal(signal.SIGUSR1, _on_interrupt)
-    signal.signal(signal.SIGINT, lambda s, f: sys.exit(0))
     _write_pid()
 
     config = load_config()
     anim_config = config.get("animation", {})
+    stt_config = config.get("stt", {})
 
-    # Clean up stale socket
+    # STT setup
+    whisper_bin = _find_whisper_cpp()
+    whisper_model = _find_whisper_model(stt_config.get("model", "base.en"))
+    stt_available = whisper_bin and whisper_model
+    hotkey_str = stt_config.get("hotkey", "<ctrl>+<shift>+v")
+
+    # TTS socket setup
     try:
         os.unlink(SOCK_PATH)
     except FileNotFoundError:
@@ -222,19 +292,55 @@ def run_daemon():
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     server.bind(SOCK_PATH)
     server.listen(1)
-    server.settimeout(1.0)
+    server.settimeout(0.5)
 
-    sys.stdout.write("[voice-mode] TTS daemon running. Waiting for text...\n")
-    sys.stdout.write(f"[voice-mode] Socket: {SOCK_PATH}\n")
-    sys.stdout.write("[voice-mode] Press Ctrl+C to quit.\n\n")
-    sys.stdout.flush()
+    out = sys.stdout
+    out.write("[voice-mode] Daemon running\n")
+    out.write(f"  TTS: listening on socket\n")
+    if stt_available:
+        out.write(f"  STT: press {hotkey_str} to talk\n")
+    else:
+        out.write(f"  STT: unavailable (whisper-cpp not found)\n")
+    out.write(f"  Press Ctrl+C to quit.\n\n")
+    out.flush()
 
-    try:
+    # Recording state
+    recording = [False]
+    audio_chunks: list[np.ndarray] = []
+    tts_playing = [False]
+
+    def handle_tts(text: str):
+        """Play TTS with orb animation."""
+        cleaned = clean_for_speech(text)
+        if not cleaned:
+            return
+
+        cfg = load_config()
+        if not cfg.get("tts", {}).get("enabled", True):
+            return
+
+        animator = OrbAnimator(
+            radius=anim_config.get("radius", 8),
+            fps=anim_config.get("fps", 15),
+            color=anim_config.get("color", "white"),
+        )
+
+        tts_playing[0] = True
+        INTERRUPTED.clear()
+        try:
+            play_audio(cleaned, cfg, animator=animator)
+        finally:
+            tts_playing[0] = False
+
+    def socket_listener():
+        """Background thread: accept TTS text from Claude Code hook."""
         while True:
             try:
                 conn, _ = server.accept()
             except socket.timeout:
                 continue
+            except OSError:
+                break
 
             data = b""
             while True:
@@ -245,35 +351,94 @@ def run_daemon():
             conn.close()
 
             text = data.decode("utf-8").strip()
-            if not text:
-                continue
+            if text:
+                handle_tts(text)
 
-            cleaned = clean_for_speech(text)
-            if not cleaned:
-                continue
+    sock_thread = threading.Thread(target=socket_listener, daemon=True)
+    sock_thread.start()
 
-            config = load_config()
-            if not config.get("tts", {}).get("enabled", True):
-                continue
+    def toggle_recording():
+        """Hotkey handler: stop TTS if playing, then toggle recording."""
+        if tts_playing[0]:
+            INTERRUPTED.set()
+            time.sleep(0.1)
 
-            animator = OrbAnimator(
-                radius=anim_config.get("radius", 8),
-                fps=anim_config.get("fps", 15),
-                color=anim_config.get("color", "cyan"),
-            )
+        if recording[0]:
+            recording[0] = False
+            return
 
-            INTERRUPTED.clear()
-            play_audio(cleaned, config, animator=animator)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        server.close()
-        _clear_pid()
+        def do_record():
+            audio_chunks.clear()
+            recording[0] = True
+
+            def mic_callback(indata, frames, time_info, status):
+                if recording[0]:
+                    audio_chunks.append(indata.copy())
+
+            with sd.InputStream(samplerate=16000, channels=1, dtype="float32",
+                                callback=mic_callback):
+                indicator = ["⬤ ", "  "]
+                i = 0
+                while recording[0]:
+                    out.write(f"\r  \033[91m{indicator[i % 2]}\033[0mRecording... (press hotkey to stop)")
+                    out.flush()
+                    i += 1
+                    time.sleep(0.4)
+
+            out.write("\r" + " " * 60 + "\r")
+            out.flush()
+
+            if not audio_chunks or len(audio_chunks) < 2:
+                out.write("  Recording too short\n")
+                out.flush()
+                return
+
+            audio = np.concatenate(audio_chunks, axis=0)
+            out.write("  Transcribing...\r")
+            out.flush()
+
+            text = _transcribe(audio, whisper_bin, whisper_model)
+
+            out.write("\r" + " " * 40 + "\r")
+            if text:
+                out.write(f"  You: {text}\n")
+                out.flush()
+                _type_text(text)
+            else:
+                out.write("  (no speech detected)\n")
+                out.flush()
+
+        threading.Thread(target=do_record, daemon=True).start()
+
+    # Keyboard listener (main thread)
+    if stt_available and stt_config.get("enabled", True):
+        from pynput import keyboard
+
+        hotkey = keyboard.HotKey(keyboard.HotKey.parse(hotkey_str), toggle_recording)
+
+        with keyboard.Listener(
+            on_press=lambda k: hotkey.press(k),
+            on_release=lambda k: hotkey.release(k),
+        ) as listener:
+            try:
+                listener.join()
+            except KeyboardInterrupt:
+                pass
+    else:
         try:
-            os.unlink(SOCK_PATH)
-        except FileNotFoundError:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
             pass
-        print("\n[voice-mode] Daemon stopped.")
+
+    server.close()
+    _clear_pid()
+    try:
+        os.unlink(SOCK_PATH)
+    except FileNotFoundError:
+        pass
+    out.write("\n[voice-mode] Stopped.\n")
+    out.flush()
 
 
 def main():
