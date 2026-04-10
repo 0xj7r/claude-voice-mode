@@ -279,6 +279,7 @@ def run_daemon():
     config = load_config()
     anim_config = config.get("animation", {})
     stt_config = config.get("stt", {})
+    out = sys.stdout
 
     # STT setup (faster-whisper, loaded once into memory)
     out.write("  Loading STT model...\n")
