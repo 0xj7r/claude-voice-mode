@@ -69,8 +69,12 @@ def extract_last_assistant_message(transcript_path: str) -> str | None:
 
     last_text = None
 
-    for msg in reversed(data):
-        if msg.get("role") != "assistant":
+    for entry in reversed(data):
+        # Claude Code JSONL wraps messages: {"type":"assistant","message":{...}}
+        msg = entry.get("message", entry)
+
+        role = msg.get("role", entry.get("type"))
+        if role != "assistant":
             continue
 
         content = msg.get("content", "")
@@ -110,8 +114,10 @@ def split_sentences(text: str) -> list[str]:
 
 
 def play_with_animation(text: str, config: dict):
-    """Stream TTS through Kokoro with orb animation."""
+    """Stream TTS through Kokoro with orb animation. Pre-synthesizes next
+    sentence while current one plays to eliminate gaps."""
     import sounddevice as sd
+    from queue import Queue
 
     try:
         from kokoro_onnx import Kokoro
@@ -145,16 +151,29 @@ def play_with_animation(text: str, config: dict):
     if not sentences:
         return
 
-    animator.start()
+    # Pre-synthesize all sentences in a background thread
+    audio_queue: Queue[tuple[np.ndarray, int] | None] = Queue(maxsize=3)
 
-    try:
+    def synth_worker():
         for sentence in sentences:
             if INTERRUPTED.is_set():
                 break
-
             samples, sr = kokoro.create(sentence, voice=voice, speed=speed)
-            samples = samples.astype(np.float32)
+            audio_queue.put((samples.astype(np.float32), sr))
+        audio_queue.put(None)
 
+    synth_thread = threading.Thread(target=synth_worker, daemon=True)
+    synth_thread.start()
+
+    animator.start()
+
+    try:
+        while not INTERRUPTED.is_set():
+            item = audio_queue.get()
+            if item is None:
+                break
+
+            samples, sr = item
             block_size = 1024
             pos = [0]
             finished = threading.Event()
@@ -177,9 +196,8 @@ def play_with_animation(text: str, config: dict):
                 else:
                     outdata[:, 0] = samples[start:end]
 
-                chunk = outdata[:, 0]
                 with rms_lock:
-                    rms_val[0] = float(np.sqrt(np.mean(chunk**2)))
+                    rms_val[0] = float(np.sqrt(np.mean(outdata[:, 0]**2)))
 
                 pos[0] = end
 
@@ -194,8 +212,6 @@ def play_with_animation(text: str, config: dict):
                         rms = rms_val[0]
                     animator.set_amplitude(min(1.0, rms * 5))
                     time.sleep(1.0 / animator.fps)
-
-            animator.set_amplitude(0.0)
     finally:
         animator.stop()
         _clear_pid()
@@ -208,17 +224,19 @@ def main():
 
     try:
         hook_input = json.loads(sys.stdin.read())
-        transcript_path = hook_input.get("transcript_path")
-
-        if not transcript_path:
-            sys.stderr.write("[voice-mode] No transcript_path in hook input\n")
-            sys.exit(1)
 
         config = load_config()
         if not config.get("tts", {}).get("enabled", True):
             sys.exit(0)
 
-        text = extract_last_assistant_message(transcript_path)
+        # Prefer last_assistant_message (direct from hook), fall back to transcript
+        text = hook_input.get("last_assistant_message")
+
+        if not text:
+            transcript_path = hook_input.get("transcript_path")
+            if transcript_path:
+                text = extract_last_assistant_message(transcript_path)
+
         if not text:
             sys.exit(0)
 
