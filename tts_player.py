@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """
-TTS Player: reads Claude's last response from transcript and speaks it aloud
-with a pulsing orb animation during playback.
+TTS Player: speaks text aloud via Kokoro with orb animation.
+
+Two modes:
+  1. Direct: pipe JSON on stdin (used by hook_tts.sh)
+  2. Daemon: listens on a Unix socket for text to speak (shows orb in terminal)
 """
 
 import json
 import signal
+import socket
 import sys
 import os
 import re
@@ -19,6 +23,7 @@ from orb_animator import OrbAnimator
 VOICE_MODE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(VOICE_MODE_DIR, "config.json")
 PID_PATH = os.path.join(VOICE_MODE_DIR, ".tts.pid")
+SOCK_PATH = os.path.join(VOICE_MODE_DIR, ".tts.sock")
 
 INTERRUPTED = threading.Event()
 
@@ -52,7 +57,6 @@ def extract_last_assistant_message(transcript_path: str) -> str | None:
     with open(transcript_path) as f:
         content = f.read().strip()
 
-    # Handle both JSON array and JSONL formats
     try:
         data = json.loads(content)
         if not isinstance(data, list):
@@ -67,32 +71,26 @@ def extract_last_assistant_message(transcript_path: str) -> str | None:
                 except json.JSONDecodeError:
                     continue
 
-    last_text = None
-
     for entry in reversed(data):
-        # Claude Code JSONL wraps messages: {"type":"assistant","message":{...}}
         msg = entry.get("message", entry)
-
         role = msg.get("role", entry.get("type"))
         if role != "assistant":
             continue
 
-        content = msg.get("content", "")
+        msg_content = msg.get("content", "")
 
-        if isinstance(content, str):
-            last_text = content
-            break
+        if isinstance(msg_content, str) and msg_content.strip():
+            return msg_content
 
-        if isinstance(content, list):
+        if isinstance(msg_content, list):
             texts = []
-            for block in content:
+            for block in msg_content:
                 if isinstance(block, dict) and block.get("type") == "text":
                     texts.append(block["text"])
             if texts:
-                last_text = "\n".join(texts)
-                break
+                return "\n".join(texts)
 
-    return last_text
+    return None
 
 
 def clean_for_speech(text: str) -> str:
@@ -113,141 +111,232 @@ def split_sentences(text: str) -> list[str]:
     return [s.strip() for s in sentences if s.strip()]
 
 
-def play_with_animation(text: str, config: dict):
-    """Stream TTS through Kokoro with orb animation. Pre-synthesizes next
-    sentence while current one plays to eliminate gaps."""
+def play_audio(text: str, config: dict, animator: OrbAnimator | None = None):
+    """Synthesize and play text. Optionally drive an orb animator."""
     import sounddevice as sd
+    from kokoro_onnx import Kokoro
     from queue import Queue
-
-    try:
-        from kokoro_onnx import Kokoro
-    except ImportError:
-        sys.stderr.write("\n[voice-mode] kokoro-onnx not installed. Run: pip install kokoro-onnx\n")
-        return
 
     model_dir = os.path.join(VOICE_MODE_DIR, "models")
     model_path = os.path.join(model_dir, "kokoro-v1.0.onnx")
     voices_path = os.path.join(model_dir, "voices-v1.0.bin")
 
     if not os.path.exists(model_path) or not os.path.exists(voices_path):
-        sys.stderr.write(
-            "\n[voice-mode] Models not found. Run: python setup.py\n"
-        )
+        sys.stderr.write("[voice-mode] Models not found. Run: bash install.sh\n")
         return
 
     tts_config = config.get("tts", {})
-    anim_config = config.get("animation", {})
     voice = tts_config.get("voice", "af_heart")
     speed = tts_config.get("speed", 1.1)
 
     kokoro = Kokoro(model_path, voices_path)
-    animator = OrbAnimator(
-        radius=anim_config.get("radius", 8),
-        fps=anim_config.get("fps", 15),
-        color=anim_config.get("color", "cyan"),
-    )
 
     sentences = split_sentences(text)
     if not sentences:
         return
 
-    # Pre-synthesize all sentences in a background thread
-    audio_queue: Queue[tuple[np.ndarray, int] | None] = Queue(maxsize=3)
+    # Pre-synthesize in background thread
+    audio_queue: Queue[np.ndarray | None] = Queue(maxsize=3)
+    target_sr = [0]
 
     def synth_worker():
         for sentence in sentences:
             if INTERRUPTED.is_set():
                 break
             samples, sr = kokoro.create(sentence, voice=voice, speed=speed)
-            audio_queue.put((samples.astype(np.float32), sr))
+            target_sr[0] = sr
+            audio_queue.put(samples.astype(np.float32))
         audio_queue.put(None)
 
     synth_thread = threading.Thread(target=synth_worker, daemon=True)
     synth_thread.start()
 
-    animator.start()
+    # Wait for first chunk to get sample rate
+    first = audio_queue.get()
+    if first is None:
+        return
+
+    sr = target_sr[0]
+
+    if animator:
+        animator.start()
 
     try:
-        while not INTERRUPTED.is_set():
-            item = audio_queue.get()
-            if item is None:
-                break
-
-            samples, sr = item
+        samples = first
+        while samples is not None and not INTERRUPTED.is_set():
             block_size = 1024
-            pos = [0]
+            pos = 0
+            total = len(samples)
             finished = threading.Event()
-            rms_val = [0.0]
-            rms_lock = threading.Lock()
+            current_rms = [0.0]
+
+            # Use a class to avoid closure issues
+            class PlayState:
+                p = 0
+                s = samples
+                f = finished
+
+            state = PlayState()
 
             def callback(outdata, frames, time_info, status):
                 if INTERRUPTED.is_set():
                     outdata[:] = 0
-                    finished.set()
+                    state.f.set()
                     return
 
-                start = pos[0]
+                start = state.p
                 end = start + frames
-                if end >= len(samples):
-                    chunk = samples[start:]
+                if end >= len(state.s):
+                    chunk = state.s[start:]
                     outdata[:len(chunk), 0] = chunk
                     outdata[len(chunk):] = 0
-                    finished.set()
+                    state.f.set()
                 else:
-                    outdata[:, 0] = samples[start:end]
+                    outdata[:, 0] = state.s[start:end]
 
-                with rms_lock:
-                    rms_val[0] = float(np.sqrt(np.mean(outdata[:, 0]**2)))
-
-                pos[0] = end
+                current_rms[0] = float(np.sqrt(np.mean(outdata[:, 0] ** 2)))
+                state.p = end
 
             with sd.OutputStream(
-                samplerate=sr,
-                channels=1,
-                blocksize=block_size,
-                callback=callback,
+                samplerate=sr, channels=1, blocksize=block_size, callback=callback
             ):
-                while not finished.is_set() and not INTERRUPTED.is_set():
-                    with rms_lock:
-                        rms = rms_val[0]
-                    animator.set_amplitude(min(1.0, rms * 5))
-                    time.sleep(1.0 / animator.fps)
+                while not state.f.is_set() and not INTERRUPTED.is_set():
+                    if animator:
+                        animator.set_amplitude(min(1.0, current_rms[0] * 5))
+                    time.sleep(1.0 / 30)
+
+            samples = audio_queue.get()
     finally:
-        animator.stop()
+        INTERRUPTED.clear()
+        if animator:
+            animator.set_amplitude(0.0)
+            animator.stop()
+
+
+def send_to_daemon(text: str) -> bool:
+    """Send text to a running TTS daemon via Unix socket. Returns True if sent."""
+    if not os.path.exists(SOCK_PATH):
+        return False
+    try:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(2)
+        sock.connect(SOCK_PATH)
+        sock.sendall(text.encode("utf-8"))
+        sock.close()
+        return True
+    except (ConnectionRefusedError, FileNotFoundError, OSError):
+        return False
+
+
+def run_daemon():
+    """Run as a foreground daemon: listens on a socket, shows orb in terminal."""
+    signal.signal(signal.SIGUSR1, _on_interrupt)
+    signal.signal(signal.SIGINT, lambda s, f: sys.exit(0))
+    _write_pid()
+
+    config = load_config()
+    anim_config = config.get("animation", {})
+
+    # Clean up stale socket
+    try:
+        os.unlink(SOCK_PATH)
+    except FileNotFoundError:
+        pass
+
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(SOCK_PATH)
+    server.listen(1)
+    server.settimeout(1.0)
+
+    print("[voice-mode] TTS daemon running. Waiting for text...")
+    print(f"[voice-mode] Socket: {SOCK_PATH}")
+    print("[voice-mode] Press Ctrl+C to quit.\n")
+
+    try:
+        while True:
+            try:
+                conn, _ = server.accept()
+            except socket.timeout:
+                continue
+
+            data = b""
+            while True:
+                chunk = conn.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+            conn.close()
+
+            text = data.decode("utf-8").strip()
+            if not text:
+                continue
+
+            cleaned = clean_for_speech(text)
+            if not cleaned:
+                continue
+
+            config = load_config()
+            if not config.get("tts", {}).get("enabled", True):
+                continue
+
+            animator = OrbAnimator(
+                radius=anim_config.get("radius", 8),
+                fps=anim_config.get("fps", 15),
+                color=anim_config.get("color", "cyan"),
+            )
+
+            INTERRUPTED.clear()
+            play_audio(cleaned, config, animator=animator)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.close()
         _clear_pid()
+        try:
+            os.unlink(SOCK_PATH)
+        except FileNotFoundError:
+            pass
+        print("\n[voice-mode] Daemon stopped.")
 
 
 def main():
+    """Hook entry point: receives JSON on stdin, sends text to daemon or plays directly."""
+    hook_input = json.loads(sys.stdin.read())
+
+    config = load_config()
+    if not config.get("tts", {}).get("enabled", True):
+        sys.exit(0)
+
+    text = hook_input.get("last_assistant_message")
+
+    if not text:
+        transcript_path = hook_input.get("transcript_path")
+        if transcript_path:
+            text = extract_last_assistant_message(transcript_path)
+
+    if not text:
+        sys.exit(0)
+
+    cleaned = clean_for_speech(text)
+    if not cleaned:
+        sys.exit(0)
+
+    # Try to send to daemon (gets orb animation in the daemon terminal)
+    if send_to_daemon(cleaned):
+        sys.exit(0)
+
+    # No daemon running: play directly (no orb, just audio)
     signal.signal(signal.SIGUSR1, _on_interrupt)
     signal.signal(signal.SIGINT, _on_interrupt)
     _write_pid()
-
     try:
-        hook_input = json.loads(sys.stdin.read())
-
-        config = load_config()
-        if not config.get("tts", {}).get("enabled", True):
-            sys.exit(0)
-
-        # Prefer last_assistant_message (direct from hook), fall back to transcript
-        text = hook_input.get("last_assistant_message")
-
-        if not text:
-            transcript_path = hook_input.get("transcript_path")
-            if transcript_path:
-                text = extract_last_assistant_message(transcript_path)
-
-        if not text:
-            sys.exit(0)
-
-        cleaned = clean_for_speech(text)
-        if not cleaned:
-            sys.exit(0)
-
-        play_with_animation(cleaned, config)
+        play_audio(cleaned, config, animator=None)
     finally:
         _clear_pid()
 
 
 if __name__ == "__main__":
-    main()
+    if "--daemon" in sys.argv:
+        run_daemon()
+    else:
+        main()
