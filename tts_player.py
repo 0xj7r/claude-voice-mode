@@ -230,9 +230,17 @@ def _find_whisper_model(model_name: str = "base.en") -> str | None:
     return None
 
 
-def _transcribe(audio: np.ndarray, whisper_bin: str, model_path: str) -> str:
-    """Record numpy audio to wav, transcribe with whisper.cpp."""
-    import subprocess as sp
+def _load_whisper_model():
+    """Load faster-whisper model (cached in daemon memory)."""
+    try:
+        from faster_whisper import WhisperModel
+        return WhisperModel("tiny.en", compute_type="int8")
+    except ImportError:
+        return None
+
+
+def _transcribe_fast(audio: np.ndarray, model) -> str:
+    """Transcribe numpy audio using faster-whisper (sub-1s)."""
     import tempfile
     import wave
 
@@ -247,13 +255,8 @@ def _transcribe(audio: np.ndarray, whisper_bin: str, model_path: str) -> str:
             wf.setframerate(16000)
             wf.writeframes(audio_int16.tobytes())
 
-        result = sp.run(
-            [whisper_bin, "-m", model_path, "-f", wav_path, "--no-timestamps", "-nt"],
-            capture_output=True, text=True, timeout=30,
-        )
-        if result.returncode == 0:
-            return result.stdout.strip()
-        return ""
+        segments, _ = model.transcribe(wav_path, language="en")
+        return " ".join(s.text for s in segments).strip()
     finally:
         os.unlink(wav_path)
 
@@ -277,10 +280,11 @@ def run_daemon():
     anim_config = config.get("animation", {})
     stt_config = config.get("stt", {})
 
-    # STT setup
-    whisper_bin = _find_whisper_cpp()
-    whisper_model = _find_whisper_model(stt_config.get("model", "base.en"))
-    stt_available = whisper_bin and whisper_model
+    # STT setup (faster-whisper, loaded once into memory)
+    out.write("  Loading STT model...\n")
+    out.flush()
+    whisper_model = _load_whisper_model()
+    stt_available = whisper_model is not None
     hotkey_str = stt_config.get("hotkey", "<ctrl>+<shift>+v")
 
     # TTS socket setup
@@ -397,7 +401,7 @@ def run_daemon():
             out.write("  Transcribing...\r")
             out.flush()
 
-            text = _transcribe(audio, whisper_bin, whisper_model)
+            text = _transcribe_fast(audio, whisper_model)
 
             out.write("\r" + " " * 40 + "\r")
             if text:
