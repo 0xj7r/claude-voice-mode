@@ -50,7 +50,22 @@ def extract_last_assistant_message(transcript_path: str) -> str | None:
         return None
 
     with open(transcript_path) as f:
-        data = json.load(f)
+        content = f.read().strip()
+
+    # Handle both JSON array and JSONL formats
+    try:
+        data = json.loads(content)
+        if not isinstance(data, list):
+            data = [data]
+    except json.JSONDecodeError:
+        data = []
+        for line in content.splitlines():
+            line = line.strip()
+            if line:
+                try:
+                    data.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
 
     last_text = None
 
