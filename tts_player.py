@@ -112,10 +112,9 @@ def split_sentences(text: str) -> list[str]:
 
 
 def play_audio(text: str, config: dict, animator: OrbAnimator | None = None):
-    """Synthesize and play text. Optionally drive an orb animator."""
+    """Synthesize all sentences into one buffer, play with a single stream."""
     import sounddevice as sd
     from kokoro_onnx import Kokoro
-    from queue import Queue
 
     model_dir = os.path.join(VOICE_MODE_DIR, "models")
     model_path = os.path.join(model_dir, "kokoro-v1.0.onnx")
@@ -135,77 +134,54 @@ def play_audio(text: str, config: dict, animator: OrbAnimator | None = None):
     if not sentences:
         return
 
-    # Pre-synthesize in background thread
-    audio_queue: Queue[np.ndarray | None] = Queue(maxsize=3)
-    target_sr = [0]
+    # Synthesize everything upfront into one contiguous buffer
+    chunks = []
+    sr = 0
+    for sentence in sentences:
+        if INTERRUPTED.is_set():
+            return
+        samples, sr = kokoro.create(sentence, voice=voice, speed=speed)
+        chunks.append(samples.astype(np.float32))
 
-    def synth_worker():
-        for sentence in sentences:
-            if INTERRUPTED.is_set():
-                break
-            samples, sr = kokoro.create(sentence, voice=voice, speed=speed)
-            target_sr[0] = sr
-            audio_queue.put(samples.astype(np.float32))
-        audio_queue.put(None)
-
-    synth_thread = threading.Thread(target=synth_worker, daemon=True)
-    synth_thread.start()
-
-    # Wait for first chunk to get sample rate
-    first = audio_queue.get()
-    if first is None:
+    if not chunks or sr == 0:
         return
 
-    sr = target_sr[0]
+    audio = np.concatenate(chunks)
+    pos = [0]
+    finished = threading.Event()
+    current_rms = [0.0]
+
+    def callback(outdata, frames, time_info, status):
+        if INTERRUPTED.is_set():
+            outdata[:] = 0
+            finished.set()
+            return
+
+        start = pos[0]
+        end = start + frames
+        if end >= len(audio):
+            remaining = len(audio) - start
+            if remaining > 0:
+                outdata[:remaining, 0] = audio[start:]
+            outdata[remaining:] = 0
+            finished.set()
+        else:
+            outdata[:, 0] = audio[start:end]
+
+        current_rms[0] = float(np.sqrt(np.mean(outdata[:, 0] ** 2)))
+        pos[0] = end
 
     if animator:
         animator.start()
 
     try:
-        samples = first
-        while samples is not None and not INTERRUPTED.is_set():
-            block_size = 1024
-            pos = 0
-            total = len(samples)
-            finished = threading.Event()
-            current_rms = [0.0]
-
-            # Use a class to avoid closure issues
-            class PlayState:
-                p = 0
-                s = samples
-                f = finished
-
-            state = PlayState()
-
-            def callback(outdata, frames, time_info, status):
-                if INTERRUPTED.is_set():
-                    outdata[:] = 0
-                    state.f.set()
-                    return
-
-                start = state.p
-                end = start + frames
-                if end >= len(state.s):
-                    chunk = state.s[start:]
-                    outdata[:len(chunk), 0] = chunk
-                    outdata[len(chunk):] = 0
-                    state.f.set()
-                else:
-                    outdata[:, 0] = state.s[start:end]
-
-                current_rms[0] = float(np.sqrt(np.mean(outdata[:, 0] ** 2)))
-                state.p = end
-
-            with sd.OutputStream(
-                samplerate=sr, channels=1, blocksize=block_size, callback=callback
-            ):
-                while not state.f.is_set() and not INTERRUPTED.is_set():
-                    if animator:
-                        animator.set_amplitude(min(1.0, current_rms[0] * 5))
-                    time.sleep(1.0 / 30)
-
-            samples = audio_queue.get()
+        with sd.OutputStream(
+            samplerate=sr, channels=1, blocksize=2048, callback=callback
+        ):
+            while not finished.is_set() and not INTERRUPTED.is_set():
+                if animator:
+                    animator.set_amplitude(min(1.0, current_rms[0] * 5))
+                time.sleep(1.0 / 30)
     finally:
         INTERRUPTED.clear()
         if animator:
@@ -248,9 +224,10 @@ def run_daemon():
     server.listen(1)
     server.settimeout(1.0)
 
-    print("[voice-mode] TTS daemon running. Waiting for text...")
-    print(f"[voice-mode] Socket: {SOCK_PATH}")
-    print("[voice-mode] Press Ctrl+C to quit.\n")
+    sys.stdout.write("[voice-mode] TTS daemon running. Waiting for text...\n")
+    sys.stdout.write(f"[voice-mode] Socket: {SOCK_PATH}\n")
+    sys.stdout.write("[voice-mode] Press Ctrl+C to quit.\n\n")
+    sys.stdout.flush()
 
     try:
         while True:
