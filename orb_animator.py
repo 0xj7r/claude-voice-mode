@@ -44,6 +44,7 @@ class OrbAnimator:
             "magenta": ("\033[95m", "\033[35m", "\033[34m"),
             "blue":    ("\033[94m", "\033[34m", "\033[90m"),
             "white":   ("\033[97m", "\033[37m", "\033[90m"),
+            "warm":    ("\033[97m", "\033[93m", "\033[90m"),
         }
         self._color_set = self._colors.get(color, self._colors["cyan"])
         self._reset = "\033[0m"
@@ -94,12 +95,12 @@ class OrbAnimator:
                     px = char_x * 2 + dx
                     py = char_y * 4 + dy
 
-                    dist_x = (px - cx) / 2.0
+                    dist_x = (px - cx) / 1.8
                     dist_y = py - cy
                     dist = math.sqrt(dist_x**2 + dist_y**2)
 
-                    wobble = amplitude * 0.8 * math.sin(
-                        math.atan2(dist_y, dist_x) * 3 + t * 3
+                    wobble = amplitude * 0.15 * math.sin(
+                        math.atan2(dist_y, dist_x) * 6 + t * 3
                     )
 
                     if dist <= radius + wobble:

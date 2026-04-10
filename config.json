@@ -12,6 +12,6 @@
   "animation": {
     "radius": 8,
     "fps": 15,
-    "color": "cyan"
+    "color": "white"
   }
 }
