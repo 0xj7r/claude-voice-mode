@@ -261,12 +261,15 @@ def _transcribe_fast(audio: np.ndarray, model) -> str:
         os.unlink(wav_path)
 
 
-def _type_text(text: str):
-    """Type text into the focused application using osascript."""
+def _type_text(text: str, submit: bool = True):
+    """Type text into the focused application and optionally press Enter."""
     import subprocess as sp
     escaped = text.replace("\\", "\\\\").replace('"', '\\"')
-    sp.run(["osascript", "-e", f'tell application "System Events" to keystroke "{escaped}"'],
-           capture_output=True)
+    script = f'tell application "System Events"\nkeystroke "{escaped}"\n'
+    if submit:
+        script += 'key code 36\n'
+    script += 'end tell'
+    sp.run(["osascript", "-e", script], capture_output=True)
 
 
 def run_daemon():
