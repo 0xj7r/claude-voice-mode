@@ -82,7 +82,7 @@ def check_whisper_cpp():
 
 def setup_hook():
     print("\n4. Hook configuration...")
-    hook_script = os.path.join(VOICE_MODE_DIR, "hook_tts.sh")
+    hook_script = os.path.join(VOICE_MODE_DIR, "scripts", "hook_tts.sh")
     print(f"  Hook script: {hook_script}")
     print("  Add to ~/.claude/settings.json under hooks.Stop")
     print("  (run with --install-hook to auto-configure)")
@@ -106,7 +106,7 @@ def main():
     print("=" * 50)
     print("\nUsage:")
     print("  TTS (auto):     responses are spoken via Stop hook")
-    print("  STT (manual):   python voice_daemon.py")
+    print("  STT (manual):   python src/voice_daemon.py")
     print(f"  Config:         {os.path.join(VOICE_MODE_DIR, 'config.json')}")
 
 
@@ -122,7 +122,7 @@ def install_hook_config():
     hooks = settings.setdefault("hooks", {})
     stop_hooks = hooks.setdefault("Stop", [])
 
-    hook_script = os.path.join(VOICE_MODE_DIR, "hook_tts.sh")
+    hook_script = os.path.join(VOICE_MODE_DIR, "scripts", "hook_tts.sh")
     hook_entry = {
         "matcher": "",
         "hooks": [

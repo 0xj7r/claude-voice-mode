@@ -24,11 +24,8 @@ ok()   { echo -e "  ${green}✓${reset} $1"; }
 warn() { echo -e "  ${yellow}!${reset} $1"; }
 fail() { echo -e "  ${red}✗${reset} $1"; exit 1; }
 
-echo -e "${bold}"
-echo "  ╔══════════════════════════════════════╗"
-echo "  ║   Claude Code Voice Mode Installer   ║"
-echo "  ╚══════════════════════════════════════╝"
-echo -e "${reset}"
+echo -e "${bold}Claude Code Voice Mode Installer${reset}"
+echo ""
 
 # 1. Check prerequisites
 step 1 "Checking prerequisites..."
@@ -108,7 +105,7 @@ fi
 # 6. Configure Claude Code hook
 step 6 "Configuring Claude Code hook..."
 
-chmod +x "${VOICE_DIR}/hook_tts.sh"
+chmod +x "${VOICE_DIR}/scripts/hook_tts.sh"
 
 if [ -f "$SETTINGS" ]; then
     if grep -q "hook_tts.sh" "$SETTINGS" 2>/dev/null; then
@@ -127,7 +124,7 @@ stop.append({
     'matcher': '',
     'hooks': [{
         'type': 'command',
-        'command': '${VOICE_DIR}/hook_tts.sh',
+        'command': '${VOICE_DIR}/scripts/hook_tts.sh',
         'timeout': 120
     }]
 })
@@ -148,7 +145,7 @@ else
         "hooks": [
           {
             "type": "command",
-            "command": "~/.claude/voice-mode/hook_tts.sh",
+            "command": "~/.claude/voice-mode/scripts/hook_tts.sh",
             "timeout": 120
           }
         ]
@@ -167,10 +164,10 @@ echo ""
 echo "  TTS is now active. Claude's responses will be spoken aloud."
 echo ""
 echo "  For voice input (STT), run in a separate terminal:"
-echo -e "    ${cyan}~/.claude/voice-mode/venv/bin/python3 ~/.claude/voice-mode/voice_daemon.py${reset}"
+echo -e "    ${cyan}~/.claude/voice-mode/venv/bin/python3 ~/.claude/voice-mode/src/voice_daemon.py${reset}"
 echo ""
 echo "  Config: ${VOICE_DIR}/config.json"
-echo "  Test:   ${VOICE_DIR}/venv/bin/python3 ${VOICE_DIR}/test_tts.py"
+echo "  Test:   ${VOICE_DIR}/venv/bin/python3 ${VOICE_DIR}/tests/test_tts.py"
 echo ""
 echo "  To disable TTS, set \"enabled\": false in config.json"
 echo ""

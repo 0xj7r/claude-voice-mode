@@ -16,7 +16,7 @@ import time
 import numpy as np
 import sounddevice as sd
 
-VOICE_MODE_DIR = os.path.dirname(os.path.abspath(__file__))
+VOICE_MODE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONFIG_PATH = os.path.join(VOICE_MODE_DIR, "config.json")
 
 SAMPLE_RATE = 16000

@@ -6,8 +6,8 @@ import sys
 import math
 import time
 
-VOICE_MODE_DIR = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, VOICE_MODE_DIR)
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(REPO_ROOT, "src"))
 
 from tts_player import play_with_animation, load_config
 from orb_animator import OrbAnimator

@@ -20,7 +20,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from orb_animator import OrbAnimator
 
-VOICE_MODE_DIR = os.path.dirname(os.path.abspath(__file__))
+VOICE_MODE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONFIG_PATH = os.path.join(VOICE_MODE_DIR, "config.json")
 PID_PATH = os.path.join(VOICE_MODE_DIR, ".tts.pid")
 SOCK_PATH = os.path.join(VOICE_MODE_DIR, ".tts.sock")
@@ -121,7 +121,7 @@ def play_audio(text: str, config: dict, animator: OrbAnimator | None = None):
     voices_path = os.path.join(model_dir, "voices-v1.0.bin")
 
     if not os.path.exists(model_path) or not os.path.exists(voices_path):
-        sys.stderr.write("[voice-mode] Models not found. Run: bash install.sh\n")
+        sys.stderr.write("[voice-mode] Models not found. Run: bash scripts/install.sh\n")
         return
 
     tts_config = config.get("tts", {})

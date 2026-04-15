@@ -10,7 +10,8 @@ import threading
 import time
 import unittest
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(REPO_ROOT, "src"))
 from tts_player import (
     clean_for_speech,
     extract_last_assistant_message,
